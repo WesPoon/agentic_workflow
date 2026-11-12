@@ -1,0 +1,1 @@
+Your previous reply was cut off at the output token limit before it finished; no tool call was received. Do not repeat your plan or reasoning. Resume where you stopped and make the tool call now. If you were writing a file, send the complete file in a single write call.

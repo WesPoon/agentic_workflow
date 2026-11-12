@@ -1,0 +1,164 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Momentum pipeline: artifact bucket, LangGraph checkpoint table, secrets, the policy to attach to the
+  AgentCore runtime execution role, and the instance role/profile for the EC2 backtest runner.
+  The Store table is created by scripts/setup_store.py (DynamoDBStore.setup()).
+
+Parameters:
+  BucketName:
+    Type: String
+    Description: Globally unique S3 bucket name for papers, run artifacts and checkpoint offload
+  CheckpointTableName:
+    Type: String
+    Default: momentum-checkpoints
+  StoreTableName:
+    Type: String
+    Default: momentum-store
+  BedrockInferenceProfileId:
+    Type: String
+    Default: us.anthropic.claude-opus-5-5
+    Description: Cross-region inference profile the agent calls (LLM_MODEL_ID)
+  BedrockFoundationModelId:
+    Type: String
+    Default: anthropic.claude-opus-5-5
+    Description: Underlying foundation model id of the profile
+  RunsRetentionDays:
+    Type: Number
+    Default: 180
+
+Resources:
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Ref BucketName
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: {SSEAlgorithm: AES256}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration: {Status: Enabled}
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-runs
+            Status: Enabled
+            Prefix: runs/
+            ExpirationInDays: !Ref RunsRetentionDays
+            NoncurrentVersionExpiration: {NoncurrentDays: 30}
+
+  CheckpointTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Ref CheckpointTableName
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - {AttributeName: PK, AttributeType: S}
+        - {AttributeName: SK, AttributeType: S}
+      KeySchema:
+        - {AttributeName: PK, KeyType: HASH}
+        - {AttributeName: SK, KeyType: RANGE}
+      TimeToLiveSpecification: {AttributeName: ttl, Enabled: true}
+      PointInTimeRecoverySpecification: {PointInTimeRecoveryEnabled: true}
+      SSESpecification: {SSEEnabled: true}
+
+  GitHubTokenSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: momentum/github-token
+      Description: Fine-grained PAT, Contents read/write on the backtest repo only. Set the value after deploy.
+      SecretString: "REPLACE_ME"
+
+  PolygonKeySecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: momentum/polygon-api-key
+      Description: Optional Polygon/Massive API key. Leave as REPLACE_ME if unused.
+      SecretString: "REPLACE_ME"
+
+  # Attach this to the execution role that `agentcore configure` creates.
+  AgentRuntimePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: momentum-agent-runtime
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: Bedrock
+            Effect: Allow
+            Action: [bedrock:InvokeModel, bedrock:InvokeModelWithResponseStream]
+            Resource:
+              - !Sub arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/${BedrockInferenceProfileId}
+              - !Sub arn:${AWS::Partition}:bedrock:*::foundation-model/${BedrockFoundationModelId}*
+          - Sid: CheckpointTable
+            Effect: Allow
+            Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem, dynamodb:DeleteItem,
+                     dynamodb:Query, dynamodb:BatchGetItem, dynamodb:BatchWriteItem, dynamodb:DescribeTable]
+            Resource:
+              - !GetAtt CheckpointTable.Arn
+              - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${StoreTableName}
+              - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${StoreTableName}/index/*
+          - Sid: StoreTableScan
+            Effect: Allow
+            Action: [dynamodb:Scan]
+            Resource: !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${StoreTableName}
+          - Sid: Bucket
+            Effect: Allow
+            Action: [s3:GetObject, s3:PutObject, s3:DeleteObject, s3:PutObjectTagging]
+            Resource: !Sub ${ArtifactBucket.Arn}/*
+          - Sid: BucketList
+            Effect: Allow
+            Action: [s3:ListBucket, s3:GetLifecycleConfiguration, s3:PutLifecycleConfiguration]
+            Resource: !GetAtt ArtifactBucket.Arn
+          - Sid: Secrets
+            Effect: Allow
+            Action: [secretsmanager:GetSecretValue]
+            Resource: [!Ref GitHubTokenSecret, !Ref PolygonKeySecret]
+
+  # The EC2 runner executes LLM-written code: it gets run artifacts and the Polygon key, nothing else.
+  RunnerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: momentum-backtest-runner
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {Service: ec2.amazonaws.com}
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: runner
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [s3:GetObject, s3:PutObject]
+                Resource: !Sub ${ArtifactBucket.Arn}/runs/*
+              - Effect: Allow
+                Action: [s3:ListBucket]
+                Resource: !GetAtt ArtifactBucket.Arn
+                Condition:
+                  StringLike: {s3:prefix: ["runs/*"]}
+              - Effect: Allow
+                Action: [secretsmanager:GetSecretValue]
+                Resource: !Ref PolygonKeySecret
+
+  RunnerInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: momentum-backtest-runner
+      Roles: [!Ref RunnerRole]
+
+Outputs:
+  BucketName: {Value: !Ref ArtifactBucket}
+  CheckpointTable: {Value: !Ref CheckpointTable}
+  StoreTable: {Value: !Ref StoreTableName}
+  GitHubTokenSecretArn: {Value: !Ref GitHubTokenSecret}
+  PolygonKeySecretArn: {Value: !Ref PolygonKeySecret}
+  AgentRuntimePolicyArn: {Value: !Ref AgentRuntimePolicy}
+  RunnerInstanceProfileName: {Value: !Ref RunnerInstanceProfile}

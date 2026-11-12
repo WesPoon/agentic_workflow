@@ -1,0 +1,12 @@
+{
+  "job_id": "sample001",
+  "thread_id": "sample",
+  "strategy_name": "synthetic",
+  "revision": 0,
+  "attempt": 1,
+  "params": {"seed": 1, "drift": 0.0004},
+  "change_note": "smoke test",
+  "strategy_path": "tests/jobs/synthetic_strategy.py",
+  "output": {"kind": "local", "dir": "runs/sample/jobs/sample001"},
+  "attempts_csv": "runs/sample/attempts.csv"
+}

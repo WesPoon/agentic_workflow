@@ -1,0 +1,20 @@
+.venv/
+checkpoints/
+.env
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+backtests/
+reviews/
+research/
+papers/
+runs/
+env
+.ansible/
+*.egg-info/
+.pytest_cache/
+infra/ansible/inventory.ini
+
+# local tool settings
+.claude/settings.local.json

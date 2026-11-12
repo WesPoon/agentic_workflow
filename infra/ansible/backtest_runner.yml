@@ -1,0 +1,152 @@
+# Provision the EC2 as a GitHub Actions self-hosted runner for backtests. Idempotent.
+#
+#   TOKEN=$(gh api -X POST repos/OWNER/REPO/actions/runners/registration-token --jq .token)
+#   ansible-playbook -i infra/ansible/inventory.ini infra/ansible/backtest_runner.yml \
+#     -e github_repo=OWNER/REPO -e runner_token=$TOKEN -e aws_region=us-east-1 \
+#     [-e polygon_secret_arn=arn:aws:secretsmanager:...]
+#
+# The registration token is only needed the first time (it expires after 1 hour).
+- name: Backtest runner
+  hosts: backtest_runner
+  become: true
+  vars:
+    runner_user: runner
+    runner_dir: /opt/actions-runner
+    venv_dir: /opt/backtest/venv
+    runner_labels: backtest
+    runner_name: "{{ inventory_hostname }}"
+    polygon_secret_arn: ""
+    runner_arch_map: {x86_64: x64, aarch64: arm64}
+  pre_tasks:
+    - name: Required variables
+      ansible.builtin.assert:
+        that: [github_repo is defined, aws_region is defined]
+        fail_msg: "pass -e github_repo=OWNER/REPO -e aws_region=REGION"
+
+  tasks:
+    - name: OS packages (Amazon Linux / RHEL family)
+      ansible.builtin.dnf:
+        name: [python3.12, python3.12-pip, git, tar, gzip, libicu]
+        state: present
+      when: ansible_os_family == "RedHat"
+
+    - name: OS packages (Debian / Ubuntu)
+      ansible.builtin.apt:
+        name: [python3.12, python3.12-venv, git, tar, gzip, libicu-dev]
+        state: present
+        update_cache: true
+      when: ansible_os_family == "Debian"
+
+    - name: Unprivileged runner user (runs LLM-written code)
+      ansible.builtin.user:
+        name: "{{ runner_user }}"
+        shell: /bin/bash
+        create_home: true
+
+    - name: Backtest venv directory
+      ansible.builtin.file:
+        path: "{{ venv_dir | dirname }}"
+        state: directory
+        owner: "{{ runner_user }}"
+        mode: "0755"
+
+    - name: Copy backtest requirements
+      ansible.builtin.copy:
+        src: ../../requirements-backtest.txt
+        dest: "{{ venv_dir | dirname }}/requirements-backtest.txt"
+        owner: "{{ runner_user }}"
+        mode: "0644"
+
+    - name: Create venv and install backtest libraries
+      become_user: "{{ runner_user }}"
+      ansible.builtin.pip:
+        requirements: "{{ venv_dir | dirname }}/requirements-backtest.txt"
+        virtualenv: "{{ venv_dir }}"
+        virtualenv_command: python3.12 -m venv
+
+    - name: Latest actions/runner release
+      ansible.builtin.uri:
+        url: https://api.github.com/repos/actions/runner/releases/latest
+        return_content: true
+      register: runner_release
+      changed_when: false
+
+    - name: Runner directory
+      ansible.builtin.file:
+        path: "{{ runner_dir }}"
+        state: directory
+        owner: "{{ runner_user }}"
+        mode: "0755"
+
+    - name: Download and unpack runner
+      ansible.builtin.unarchive:
+        src: "https://github.com/actions/runner/releases/download/{{ runner_release.json.tag_name }}/actions-runner-linux-{{ runner_arch_map[ansible_architecture] }}-{{ runner_release.json.tag_name | regex_replace('^v', '') }}.tar.gz"
+        dest: "{{ runner_dir }}"
+        remote_src: true
+        owner: "{{ runner_user }}"
+        creates: "{{ runner_dir }}/config.sh"
+
+    - name: Runner dependencies
+      ansible.builtin.command: "{{ runner_dir }}/bin/installdependencies.sh"
+      args:
+        creates: "{{ runner_dir }}/.deps_installed"
+      register: deps
+      failed_when: false
+
+    - name: Mark dependencies installed
+      ansible.builtin.file:
+        path: "{{ runner_dir }}/.deps_installed"
+        state: touch
+        owner: "{{ runner_user }}"
+        mode: "0644"
+      when: deps is changed
+
+    - name: Job environment (read by the runner for every job)
+      ansible.builtin.copy:
+        dest: "{{ runner_dir }}/.env"
+        owner: "{{ runner_user }}"
+        mode: "0600"
+        content: |
+          AWS_REGION={{ aws_region }}
+          BACKTEST_PYTHON={{ venv_dir }}/bin/python
+          LOG_LEVEL=INFO
+          {% if polygon_secret_arn %}POLYGON_API_KEY_SECRET_ARN={{ polygon_secret_arn }}{% endif %}
+      notify: Restart runner
+
+    - name: Register runner with GitHub (first run only)
+      become_user: "{{ runner_user }}"
+      ansible.builtin.command:
+        argv:
+          - "{{ runner_dir }}/config.sh"
+          - --url
+          - "https://github.com/{{ github_repo }}"
+          - --token
+          - "{{ runner_token }}"
+          - --labels
+          - "{{ runner_labels }}"
+          - --name
+          - "{{ runner_name }}"
+          - --unattended
+          - --replace
+        chdir: "{{ runner_dir }}"
+        creates: "{{ runner_dir }}/.runner"
+      no_log: true
+
+    - name: Install runner service
+      ansible.builtin.command: ./svc.sh install {{ runner_user }}
+      args:
+        chdir: "{{ runner_dir }}"
+        creates: "{{ runner_dir }}/.service"
+
+    - name: Start runner service
+      ansible.builtin.command: ./svc.sh start
+      args:
+        chdir: "{{ runner_dir }}"
+      changed_when: false
+
+  handlers:
+    - name: Restart runner
+      ansible.builtin.shell: ./svc.sh stop; ./svc.sh start
+      args:
+        chdir: "{{ runner_dir }}"
+      failed_when: false

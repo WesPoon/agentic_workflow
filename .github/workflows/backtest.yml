@@ -1,0 +1,37 @@
+# Runs one backtest attempt per pushed branch run/<thread_id>/<strategy>-r<rev>-<job_id>.
+# The implementation agent creates the branch with a single commit containing
+#   strategies/<strategy>.py  and  jobs/<job_id>.json
+# The worker writes result.json, metrics.csv, tearsheet.html to S3 and appends attempts.csv.
+name: backtest
+
+on:
+  push:
+    branches: ["run/**"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backtest-ec2          # one EC2 → one backtest at a time; later pushes queue
+  cancel-in-progress: false
+
+jobs:
+  backtest:
+    runs-on: [self-hosted, backtest]
+    timeout-minutes: 60        # keep >= BACKTEST_TIMEOUT_S on the agent
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Sync backtest dependencies
+        run: "\"$BACKTEST_PYTHON\" -m pip install --quiet -r requirements-backtest.txt"
+
+      - name: Run job
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          shopt -s nullglob
+          jobs=(jobs/*.json)
+          if [ ${#jobs[@]} -eq 0 ]; then echo "no job file on this branch"; exit 0; fi
+          for f in "${jobs[@]}"; do "$BACKTEST_PYTHON" -m src.jobs.worker "$f"; done

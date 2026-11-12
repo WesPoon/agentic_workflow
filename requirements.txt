@@ -1,0 +1,4 @@
+# Local development: everything.
+-r requirements-agent.txt
+-r requirements-backtest.txt
+pytest
