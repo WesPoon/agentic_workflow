@@ -140,5 +140,22 @@ def query_past_technique_outcomes(store: Annotated[BaseStore, InjectedStore()]) 
     return json.dumps([i.value for i in store.search(("review", "technique_outcomes"), limit=200)], indent=2, default=str)
 
 
-IMPL_TOOLS = [read_strategy_spec, read_strategy_template, write_strategy_file, run_backtest,
+@tool
+def read_data_library() -> str:
+    """Documentation of the fixed data library for US single-stock strategies
+    (src.data.us_equity_panels): what the data is, its limitations, and the loader's signature."""
+    import inspect
+
+    from src.data import us_equity_panels as lib
+
+    fields = "\n".join(f"  .{name}" for name in lib.USEquityPanels.__dataclass_fields__)
+    return (f"{inspect.getdoc(lib)}\n\nfrom src.data.us_equity_panels import load_us_equity_panels\n"
+            f"load_us_equity_panels{inspect.signature(lib.load_us_equity_panels)}\n"
+            f"{inspect.getdoc(lib.load_us_equity_panels)}\n\nReturned USEquityPanels fields:\n{fields}\n\n"
+            f"from src.data.us_equity_panels import load_benchmark_returns\n"
+            f"load_benchmark_returns{inspect.signature(lib.load_benchmark_returns)}\n"
+            f"{inspect.getdoc(lib.load_benchmark_returns)}")
+
+
+IMPL_TOOLS = [read_data_library, read_strategy_spec, read_strategy_template, write_strategy_file, run_backtest,
               query_past_technique_outcomes]

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from langgraph.prebuilt import ToolNode
 
+from src.config import get_settings
 from src.nodes.common import run_agent
 from src.state import PipelineState, current_spec, has_backtest_for_current
 from src.tools.impl_tools import IMPL_TOOLS
@@ -29,6 +30,7 @@ def _build_system_prompt(state: PipelineState) -> str:
         )
     return render(
         "impl/system.md",
+        backtest_timeout_min=max(1, get_settings().backtest_timeout_s // 60),
         name=name,
         spec_block=spec.get("block", ""),
         revision_block=revision_block,

@@ -12,7 +12,7 @@ Single braces such as `{...}` are left alone.
 | `research/system.md` | research agent system prompt | `paper_list`, `memory_block` |
 | `research/kickoff.md` | first user message of the research phase | — |
 | `research/nudge.md` | user message when the agent stops before `write_strategy_spec` | — |
-| `impl/system.md` | implementation agent system prompt | `name`, `spec_block`, `revision_block`, `memory_block` |
+| `impl/system.md` | implementation agent system prompt | `name`, `spec_block`, `revision_block`, `memory_block`, `backtest_timeout_min` |
 | `impl/revision.md` | inserted as `revision_block` after a failed review | `revision_count`, `verdict`, `flags`, `notes` |
 | `impl/kickoff.md` | first user message, first attempt | `name` |
 | `impl/kickoff_revision.md` | first user message after a failed review | `name`, `revision_count` |

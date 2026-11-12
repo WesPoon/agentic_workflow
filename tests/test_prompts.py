@@ -10,7 +10,7 @@ SUPPLIED = {
     "research/system.md": {"paper_list", "memory_block"},
     "research/kickoff.md": set(),
     "research/nudge.md": set(),
-    "impl/system.md": {"name", "spec_block", "revision_block", "memory_block"},
+    "impl/system.md": {"name", "spec_block", "revision_block", "memory_block", "backtest_timeout_min"},
     "impl/revision.md": {"revision_count", "verdict", "flags", "notes"},
     "impl/kickoff.md": {"name"},
     "impl/kickoff_revision.md": {"name", "revision_count"},
@@ -42,7 +42,7 @@ def test_missing_placeholder_fails_loudly():
 
 
 def test_single_braces_untouched():
-    assert "params={...}" in render("impl/system.md", name="n", spec_block="", revision_block="", memory_block="")
+    assert "params={...}" in render("impl/system.md", name="n", spec_block="", revision_block="", memory_block="", backtest_timeout_min=30)
 
 
 def test_prompts_dir_override(tmp_path, monkeypatch):

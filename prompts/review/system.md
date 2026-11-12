@@ -42,7 +42,9 @@ Spec:
 - Train/test leakage (ML): scalers and model fits use only data available at each decision date
 - Transaction costs: 10bps applied inside the backtest, and "returns" are net of costs
 - Benchmark: SPY total return on the same dates
-- Survivorship bias: flag if only current index constituents are used
+- Survivorship bias: a US single-stock universe must come from src.data.us_equity_panels (all US
+  common stocks incl. delisted, point-in-time filters). A hand-picked list of current tickers, or
+  current index constituents, is survivorship and hindsight bias → Methodology FAIL.
 The 70/30 split and all metrics come from the fixed evaluator; do not re-check the split,
 but DO check that the code does not peek at the out-of-sample period (e.g. choosing parameters
 from full-sample statistics).

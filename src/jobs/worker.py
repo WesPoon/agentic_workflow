@@ -36,7 +36,7 @@ log = logging.getLogger("worker")
 ATTEMPT_COLUMNS = [
     "attempt_id", "timestamp", "strategy", "revision", "attempt", "commit_sha", "branch", "change_note",
     "oos_sharpe", "oos_sharpe_ci95_low", "oos_sharpe_ci95_high", "deflated_sharpe_prob",
-    "cagr", "max_drawdown", "n_trials", "status", "verdict",
+    "cagr", "max_drawdown", "n_trials", "status", "verdict", "family", "eval_mode",
 ]
 
 
@@ -116,8 +116,15 @@ def _check_contract(out) -> tuple[pd.Series, pd.Series, pd.DataFrame | None, dic
     for name, s in (("returns", returns), ("benchmark_returns", bench)):
         if not isinstance(s, pd.Series):
             raise TypeError(f"{name} must be a pandas Series indexed by date")
-        if len(s.dropna()) < 60:
-            raise ValueError(f"{name} has fewer than 60 non-null daily observations")
+    from src.jobs.evaluate import infer_periods
+
+    periods = infer_periods(returns.dropna().index)          # raises unless daily or monthly
+    minimum = 60 if periods == 252 else 36                    # ~3 months daily / 3 years monthly
+    if len(returns.dropna()) < minimum:
+        raise ValueError(f"returns has {len(returns.dropna())} non-null observations; need >= {minimum} "
+                         f"({'daily' if periods == 252 else 'monthly'})")
+    if len(bench.dropna()) < minimum:
+        raise ValueError(f"benchmark_returns has fewer than {minimum} non-null observations")
     positions = out.get("positions")
     if positions is not None and not isinstance(positions, pd.DataFrame):
         raise TypeError("positions must be a DataFrame or None")
@@ -125,6 +132,38 @@ def _check_contract(out) -> tuple[pd.Series, pd.Series, pd.DataFrame | None, dic
     if not isinstance(meta, dict):
         raise TypeError("meta must be a dict")
     return returns, bench, positions, meta
+
+
+def apply_window(window: dict, returns: pd.Series, bench: pd.Series, positions):
+    """Cut the strategy output to the evaluation window BEFORE anything is scored or written.
+
+    split   : default; evaluator splits returns 70/30 by date (in-sample / out-of-sample).
+    design  : keep returns up to window["end"] (e.g. 2018-12-31); everything is scored as one
+              design segment (reported in the out_of_sample slot). Later returns are discarded
+              even if the strategy computed them, so the holdout never leaks into results.
+    holdout : keep returns from window["start"] (e.g. 2019-01-01); scored as one segment.
+    Returns (returns, bench, positions, split) for evaluate().
+    """
+    mode = window.get("mode", "split")
+    if mode == "split":
+        return returns, bench, positions, float(window.get("split", 0.7))
+    idx = pd.to_datetime(returns.index)
+    if mode == "design":
+        keep = idx <= pd.Timestamp(window["end"])
+    elif mode == "holdout":
+        keep = idx >= pd.Timestamp(window["start"])
+    else:
+        raise ValueError(f"unknown evaluation window mode {mode!r}")
+    returns = returns[keep]
+    if len(returns.dropna()) < 12:
+        raise ValueError(f"only {len(returns.dropna())} returns inside the {mode} window {window}")
+    lo, hi = pd.to_datetime(returns.index).min(), pd.to_datetime(returns.index).max()
+    bidx = pd.to_datetime(bench.index)
+    bench = bench[(bidx >= lo - pd.Timedelta(days=31)) & (bidx <= hi)]
+    if positions is not None:
+        pidx = pd.to_datetime(positions.index)
+        positions = positions[(pidx >= lo - pd.Timedelta(days=31)) & (pidx <= hi)]
+    return returns, bench, positions, 0.0
 
 
 def run(job: dict) -> dict:
@@ -147,8 +186,17 @@ def run(job: dict) -> dict:
         "evaluated_at": datetime.now(timezone.utc).isoformat(),
         "strategy_file": str(strategy_path),
     }
+    # Trials are counted per family: the strategy itself by default, the whole paper group in group
+    # mode (baseline + every variant + finalists all count against the winner's deflated Sharpe).
+    family = job.get("family") or strategy
+    window = job.get("eval") or {"mode": "split", "split": 0.7}
     attempts = out.read_attempts()
-    prior = attempts[attempts["strategy"] == strategy] if len(attempts) else attempts
+    if len(attempts):
+        fam_col = attempts["family"] if "family" in attempts.columns else pd.Series(index=attempts.index, dtype=object)
+        fam = fam_col.where(fam_col.notna() & (fam_col.astype(str) != ""), attempts["strategy"])
+        prior = attempts[(fam == family) & (attempts["status"] == "ok")]
+    else:
+        prior = attempts
     n_trials = int(len(prior)) + 1
     prior_sharpes = [float(x) for x in pd.to_numeric(prior.get("oos_sharpe", pd.Series(dtype=float)), errors="coerce").dropna()] if len(prior) else []
 
@@ -157,7 +205,9 @@ def run(job: dict) -> dict:
         module = _load_strategy(strategy_path)
         raw = module.run_backtest(backtests_dir=str(out.dir), params=dict(job.get("params", {})))
         returns, bench, positions, meta = _check_contract(raw)
-        metrics = evaluate(returns, bench, n_trials=n_trials, prior_oos_sharpes=prior_sharpes)
+        returns, bench, positions, split = apply_window(window, returns, bench, positions)
+        metrics = evaluate(returns, bench, n_trials=n_trials, prior_oos_sharpes=prior_sharpes, split=split)
+        metrics["eval_window"] = window
         files = write_reports(metrics, returns, bench, out.dir, title=f"{strategy} r{job.get('revision')} a{job.get('attempt')}")
         if positions is not None:
             positions.to_csv(out.dir / "positions.csv")
@@ -190,6 +240,8 @@ def run(job: dict) -> dict:
         "n_trials": n_trials,
         "status": result["status"],
         "verdict": "",
+        "family": family,
+        "eval_mode": window.get("mode", "split"),
     })
     out.finalize()
     return result

@@ -49,6 +49,20 @@ def _copy_back(job_dir: Path, paths: RunPaths, strategy: str, attempt: int) -> d
     return files
 
 
+_SECRET_HINTS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL", "SESSION")
+
+
+def worker_env() -> dict[str, str]:
+    """Environment for the backtest subprocess: everything except credentials.
+
+    The worker runs LLM-written code, so API keys (LLM providers, Polygon, GitHub, AWS) are not
+    passed on. The strategy reads market data from the local cache and yfinance only."""
+    import os
+
+    return {k: v for k, v in os.environ.items()
+            if not any(h in k.upper() for h in _SECRET_HINTS) and not k.upper().startswith("AWS_")}
+
+
 def run_job(job: dict, strategy_file: Path, paths: RunPaths) -> str:
     s = get_settings()
     job = dict(job)
@@ -62,13 +76,22 @@ def run_job(job: dict, strategy_file: Path, paths: RunPaths) -> str:
         job["attempts_csv"] = str(paths.attempts_csv)
         job_file = paths.jobs / f"{job['job_id']}.json"
         job_file.write_text(json.dumps(job, indent=2, default=str), encoding="utf-8")
+        from src.jobs.local_git import snapshot
+
+        sha = snapshot(paths.root, [strategy_file, job_file],
+                       f"{job['strategy_name']} r{job.get('revision', 0)} a{job.get('attempt', 0)} "
+                       f"[{job['job_id']}]: {job.get('change_note', '')}")
+        if sha:
+            job["commit_sha"], job["branch"] = sha, "local"
+            job_file.write_text(json.dumps(job, indent=2, default=str), encoding="utf-8")
+        timeout_s = int(job.get("timeout_s") or s.backtest_timeout_s)
         try:
             proc = subprocess.run(
                 [sys.executable, "-m", "src.jobs.worker", str(job_file)],
-                cwd=str(s.code_root), capture_output=True, text=True, timeout=s.backtest_timeout_s,
+                cwd=str(s.code_root), capture_output=True, text=True, timeout=timeout_s, env=worker_env(),
             )
         except subprocess.TimeoutExpired:
-            return f"BACKTEST TIMEOUT: exceeded {s.backtest_timeout_s} seconds."
+            return f"BACKTEST TIMEOUT: exceeded {timeout_s} seconds."
         result_file = job_dir / "result.json"
         if not result_file.exists():
             return f"WORKER ERROR (exit {proc.returncode}):\n{proc.stderr[-3000:]}"
